@@ -42,6 +42,7 @@ ANALYSIS_LABELS = {
     "silhouette": "Leaf silhouette",
     "dots": "Dark fleck census",
     "weave": "Fine band spacing and angle",
+    "band_row": "Fine band row",
     "color": "Color variation",
     "coverage": "Blade color coverage",
     "defects": "Surface observations",

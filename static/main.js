@@ -1,7 +1,7 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
-import {resultCard,specimenResultRows} from "./results.js";
+import {resultCard,specimenResultRows,bandRowCard} from "./results.js";
 
-const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
+const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:"",bandRows:[],bandRow:null};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
@@ -154,9 +154,19 @@ function measureControls() {
   </form>`;
 }
 
+function bandRowsPanel() {
+  const saved = state.bandRows.length
+    ? `<div class="divider-list scroll-list">${state.bandRows.map(item=>`<div class="row"><div class="grow"><strong>${e(item.label)}</strong><br><small>${item.metrics.cells.length} cells · revision ${item.source_version} · ${e(date(item.created_at))}${item.recheck_of?" · recheck":""}</small></div>${btn("Open","band-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")}</div>`
+    : "<p class='soft'>No row analyses yet. Mark overlapping inspection regions, then run a fine band row.</p>";
+  const active = state.bandRow ? bandRowCard(state.bandRow) : "";
+  return `<section class="card stack"><div class="title-row"><h3>Fine band row (two families)</h3>${btn("New row","band-row-add","primary","plus")}</div>
+    ${active}
+    <h4>Saved row analyses</h4>${saved}</section>`;
+}
+
 function measurements() {
   return `<div class="grid-detail"><div>${state.result?resultCard(state.result,state.layer,state.tile.version):empty("Run a measurement to view its map and results.")}</div>
-    <div class="stack"><section class="card"><h3>Measure specimen</h3>${measureControls()}</section><section class="card"><h3>Saved measurements</h3>${specimenResultRows(state.results)}</section></div></div>`;
+    <div class="stack"><section class="card"><h3>Measure specimen</h3>${measureControls()}</section><section class="card"><h3>Saved measurements</h3>${specimenResultRows(state.results)}</section>${bandRowsPanel()}</div></div>`;
 }
 
 function evidencePage() {
@@ -250,8 +260,8 @@ function render() {
 
 async function gatherTile(token=travel) {
   const url=tileUrl();
-  const [results,packets,activity,refs,metrology]=await Promise.all([
-    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),
+  const [results,packets,activity,refs,metrology,bandRows]=await Promise.all([
+    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),api(url+"/band-rows"),
   ]);
   if (token!==travel) return;
   state.results=results.items;
@@ -259,6 +269,7 @@ async function gatherTile(token=travel) {
   state.activity=activity.items;
   state.metrology=metrology.items;
   state.refs=refs.items;
+  state.bandRows=bandRows.items;
 }
 
 async function route() {
@@ -270,7 +281,7 @@ async function route() {
     const tile=await api(`/api/specimens/${id}`);
     if (token!==travel) return;
     if (state.tile?.id!==tile.id || state.page!=="tile") {
-      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;
+      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;state.bandRow=null;
     }
     state.tile=tile;
     await gatherTile(token);
@@ -633,6 +644,85 @@ function parsedOptions(data,tool) {
   }));
 }
 
+function bandCellField() {
+  const choices = state.tile.regions.filter(item=>item.purpose!=="ignore")
+    .map(item=>`<label class="field check row"><input type="checkbox" name="region_id" value="${item.id}"> <span>${e(item.name)}</span></label>`).join("");
+  return `<div class="field"><label>Cells, left to right</label><div class="divider-list scroll-list region-pick">${choices}</div></div>`;
+}
+
+function bandRowForm() {
+  if (state.tile.regions.filter(item=>item.purpose!=="ignore").length < 3) {
+    throw Error("Mark at least three inspection regions to form a row.");
+  }
+  const all=state.tile.photos.filter(item=>item.registered_url);
+  const base=state.tile.plane?.photo_id;
+  modal("Fine band row",`
+    <p class="soft">Track the leaf-back and pressed-weave families across slightly overlapping cells. Each cell keeps both readings; ambiguous families stay blank and sharp turns are preserved.</p>
+    ${selectField("Photo source","photo_id",sources(all,base,"Base capture"))}
+    ${bandCellField()}
+    <div class="form-columns">
+      ${numField("First band direction (°)","reference_axis",12,0,179,1)}
+      ${numField("Search half-angle (°)","tolerance",28,6,35,1)}
+      ${numField("Minimum spacing (px)","minimum_pitch",5,3,25,1)}
+      ${numField("Maximum spacing (px)","maximum_pitch",30,8,52,1)}
+      ${numField("Angular step limit (°)","turn_limit",38,20,70,1)}
+    </div>`,"Run row analysis",async data=>{
+    const region_ids=data.getAll("region_id");
+    if (region_ids.length<3) throw Error("Choose at least three cells for the row.");
+    const body={
+      photo_id:data.get("photo_id")||null, region_ids,
+      reference_axis:Number(data.get("reference_axis")),tolerance:Number(data.get("tolerance")),
+      minimum_pitch:Number(data.get("minimum_pitch")),maximum_pitch:Number(data.get("maximum_pitch")),
+      turn_limit:Number(data.get("turn_limit")),
+    };
+    state.bandRow=await api(tileUrl()+"/band-rows",{method:"POST",body});
+    await gatherTile();
+    commitModal();
+    toast("Fine band row saved.");
+    render();
+  },true);
+}
+
+function bandRecheckForm() {
+  const record=state.bandRow;
+  const allPeaks=record.metrics.cells.flatMap(cell=>cell.peaks);
+  if (!allPeaks.length) {
+    throw Error("No local peaks were retained in this row, so there is no assignment to confirm.");
+  }
+  const cellOptions=record.metrics.cells.map(cell=>`${cell.cell}: ${cell.region_name}`)
+    .map((label,index)=>option(index+1,label)).join("");
+  modal("Recheck a cell assignment",`
+    <p class="soft">The row is recomputed on the same photograph and the original cells. The previous reading stays stored and still opens; this creates a linked recheck record.</p>
+    ${selectField("Cell","cell",cellOptions)}
+    ${selectField("Confirmed family","family",[option("A","Family A"),option("B","Family B")].join(""))}
+    <div class="field"><label>Confirmed peak (from the cell's peak list)</label><select name="peak" id="recheck-peak">
+      ${record.metrics.cells.flatMap(cell=>cell.peaks.map(peak=>option(peak.peak,`Cell ${cell.cell} · P${peak.peak} · ${peak.angle_degrees}° · pitch ${peak.pitch}${peak.harmonic_of?` (harmonic of P${peak.harmonic_of})`:""}`))).join("")}
+    </select></div>
+    ${areaField("Recheck note","note","",240)}`,"Save confirmed assignment",async data=>{
+    const body={version:record.version,cell:Number(data.get("cell")),family:data.get("family"),
+      peak:Number(data.get("peak")),note:data.get("notes")||""};
+    const cell=record.metrics.cells[body.cell-1];
+    if (!cell.peaks.some(peak=>peak.peak===body.peak)) {
+      throw Error("Choose a peak that belongs to the selected cell.");
+    }
+    state.bandRow=await api(`/api/band-rows/${record.id}/recheck`,{method:"POST",body});
+    await gatherTile();
+    commitModal();
+    toast("Recheck saved; earlier reading unchanged.");
+    render();
+  });
+  const cellSelect=q("#dialog-form [name=cell]");
+  const peakSelect=q("#recheck-peak");
+  const syncPeaks=()=>{
+    const cell=record.metrics.cells[Number(cellSelect.value)-1];
+    peakSelect.innerHTML=cell.peaks.length
+      ? cell.peaks.map(peak=>option(peak.peak,`P${peak.peak} · ${peak.angle_degrees}° · pitch ${peak.pitch}${peak.harmonic_of?` (harmonic of P${peak.harmonic_of})`:""}`)).join("")
+      : "";
+  };
+  cellSelect.addEventListener("change",syncPeaks);
+  syncPeaks();
+}
+
 async function runMeasurement(data) {
   const revision=travel;
   const result=await api(tileUrl()+"/results",{method:"POST",body:{
@@ -734,6 +824,14 @@ async function doAction(name,target) {
       render();
     },
     "result-layer":()=>{state.layer=value;render();},
+    "band-row-add":()=>bandRowForm(),
+    "band-open":async ()=>{
+      state.bandRow=await api("/api/band-rows/"+id);
+      state.bandRow._layer="overlay";
+      render();
+    },
+    "band-layer":()=>{state.bandRow._layer=value;render();},
+    "band-recheck":()=>bandRecheckForm(),
     "defect-choice":async ()=>{
       state.result=await api(`/api/results/${state.result.id}/observations/${marker}`,{method:"PUT",body:{version:state.result.version,decision:value,notes:""}});
       toast("Observation reviewed.");

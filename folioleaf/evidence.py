@@ -132,6 +132,22 @@ def study_table(report):
     return csv_lines(columns, ([item[key] for key in columns] for item in report["rows"]))
 
 
+def band_row_table(record):
+    metrics = record["metrics"]
+    unit = metrics["unit"]
+    columns = ("cell", "region_name", "family", "angle_degrees", f"pitch_{unit}",
+               "peak", "harmonic_of", "status", "sharp_turn", "conflicts")
+    rows = []
+    for cell in metrics["cells"]:
+        for family in cell["families"]:
+            rows.append([
+                cell["cell"], cell["region_name"], family["family"], family["angle_degrees"],
+                family["pitch"], family["peak"], family["harmonic_of"], family["status"],
+                family.get("sharp_turn", False), " ".join(family["conflicts"]),
+            ])
+    return csv_lines(columns, rows)
+
+
 def source_index(tile, results):
     originals = {}
     for result in results:

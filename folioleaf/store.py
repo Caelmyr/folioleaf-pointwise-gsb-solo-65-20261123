@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS metrology (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS metrology_tile ON metrology(tile_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS band_rows (
+    id TEXT PRIMARY KEY,
+    tile_id TEXT NOT NULL REFERENCES specimens(id),
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS band_rows_tile ON band_rows(tile_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -472,5 +479,33 @@ class Store:
             self._tile(conn, chosen)
             rows = conn.execute(
                 "SELECT document FROM metrology WHERE tile_id=? ORDER BY rowid DESC LIMIT 50", (chosen,),
+            ).fetchall()
+            return [json.loads(row["document"]) for row in rows]
+
+    def save_band_row(self, fields):
+        record = {**fields, "id": make_id(), "created_at": timestamp(), "version": 1}
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                "INSERT INTO band_rows(id,tile_id,document,created_at) VALUES (?,?,?,?)",
+                (record["id"], record["tile_id"], document(record), record["created_at"]),
+            )
+            event(conn, record["tile_id"], "measure", "Fine band row analysis")
+        return record
+
+    def _band_row(self, conn, identifier):
+        row_id = identity(identifier, "Band row ID")
+        row = conn.execute("SELECT document FROM band_rows WHERE id=?", (row_id,)).fetchone()
+        return artifact_row(row, "Band row analysis")
+
+    def band_row(self, identifier):
+        with self.connect() as conn:
+            return self._band_row(conn, identifier)
+
+    def list_band_rows(self, tile_id):
+        chosen = identity(tile_id, "Specimen ID")
+        with self.connect() as conn:
+            self._tile(conn, chosen)
+            rows = conn.execute(
+                "SELECT document FROM band_rows WHERE tile_id=? ORDER BY rowid DESC LIMIT 50", (chosen,),
             ).fetchall()
             return [json.loads(row["document"]) for row in rows]

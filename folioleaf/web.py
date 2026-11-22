@@ -7,9 +7,11 @@ from flask import Blueprint, Flask, Response, jsonify, request, send_file, send_
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
 from .analysis import approve_reference, evaluate
+from .bandrow_service import recheck_band_row, run_band_row
 from .demo import load_training, preview_photo
 from .evidence import (
     artifact_json,
+    band_row_table,
     create_evidence,
     evidence_zip,
     filename_stem,
@@ -284,6 +286,38 @@ def register_measurements(api, store, heavy):
         with heavy:
             record = save_reviews(store, measurement_id, model_version(data), choices)
         return jsonify(record)
+
+    @api.get("/specimens/<specimen_id>/band-rows")
+    def band_rows(specimen_id):
+        return jsonify({"items": store.list_band_rows(specimen_id)})
+
+    @api.post("/specimens/<specimen_id>/band-rows")
+    def band_row_create(specimen_id):
+        with heavy:
+            record = run_band_row(store, specimen_id, json_request())
+        return jsonify(record), 201
+
+    @api.get("/band-rows/<row_id>")
+    def band_row_show(row_id):
+        return jsonify(store.band_row(row_id))
+
+    @api.get("/band-rows/<row_id>/image/<layer>")
+    def band_row_image(row_id, layer):
+        data = store.band_row(row_id)
+        chosen = enumeration(layer, ("overlay", "source"), "Band row image")
+        return png_blob(store, data["pictures"][chosen])
+
+    @api.get("/band-rows/<row_id>/metrics.csv")
+    def band_row_csv(row_id):
+        data = store.band_row(row_id)
+        name = filename_stem(data["label"], "band-row")
+        return binary_response(band_row_table(data), "text/csv", name + ".csv")
+
+    @api.post("/band-rows/<row_id>/recheck")
+    def band_row_recheck(row_id):
+        with heavy:
+            record = recheck_band_row(store, row_id, json_request())
+        return jsonify(record), 201
 
     @api.get("/library")
     def references():

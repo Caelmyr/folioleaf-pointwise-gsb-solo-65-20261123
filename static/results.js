@@ -171,3 +171,54 @@ export function specimenResultRows(items) {
   if (!items.length) return "<p class='soft'>Run a measurement to start this specimen’s history.</p>";
   return `<div class="divider-list scroll-list">${items.map(item=>`<div class="row"><div class="grow"><strong>${e(item.label)}</strong><br><small>Revision ${item.source_version} · ${e(date(item.created_at))}</small></div>${btn("Open","result-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")}</div>`;
 }
+
+const conflictLabels = {
+  shared_peak:"Shared peak", harmonic_fundamental:"Harmonic", competing_peaks:"Competing peaks",
+  sharp_turn:"Sharp turn", no_local_peak:"No local peak", anchor_missing:"Anchor missing",
+};
+
+function bandFamilyRows(cell) {
+  return cell.families.map(family=>[
+    family.family,
+    n(family.angle_degrees,2),
+    family.pitch==null?"—":`${n(family.pitch,3)} ${family.unit || ""}`.trim(),
+    family.peak==null?"—":`P${family.peak}`,
+    family.harmonic_of?`harmonic of P${family.harmonic_of}`:"",
+    family.status,
+    family.conflicts.map(code=>conflictLabels[code]||code).join(", "),
+  ]);
+}
+
+function bandTrackPlot(m) {
+  const series = m.tracks.map((track,index)=>({
+    values: track.angles,
+    color: colors[index % colors.length],
+  }));
+  return `<h3>Family direction across the row</h3>${plot(series,"Direction by overlapping cell",{min:0,max:180})}
+    <div class="swatches">${m.tracks.map((track,index)=>dots(`Family ${track.family} · ${track.blank_cells} blank · ${track.sharp_turns} turn(s)`,colors[index % colors.length])).join(" ")}</div>`;
+}
+
+export function bandRowCard(record) {
+  const m = record.metrics;
+  const path=`/api/band-rows/${record.id}`;
+  const cellTables = m.cells.map(cell=>`
+    <details ${cell.cell<=2?"open":""}><summary>Cell ${cell.cell} · ${e(cell.region_name)} · ${n(cell.supported_pixels,0)} px</summary>
+    ${table(["Family","Direction (°)",`Pitch (${m.unit})`,"Peak","Harmonic","Status","Conflict notes"],bandFamilyRows(cell))}
+    <details><summary>All local peaks (${cell.peaks.length})</summary>${table(
+      ["Peak","Direction (°)",`Pitch (${m.unit})`,"Peak / background","Harmonic of"],
+      cell.peaks.map(peak=>[`P${peak.peak}`,n(peak.angle_degrees,2),n(peak.pitch,3),n(peak.peak_to_background,2),peak.harmonic_of?`P${peak.harmonic_of}`:"—"]))}</details>
+    ${record.kind==="band_row" && record.metrics.reassignment && cell.cell===record.metrics.reassignment.cell ? `<p class="notice">Recheck: family ${e(record.metrics.reassignment.family)} confirmed on P${record.metrics.reassignment.peak}${record.metrics.reassignment.note?` — ${e(record.metrics.reassignment.note)}`:""}.</p>`:""}
+    </details>`).join("");
+  const policy = m.conflict_policy.map(item=>`<li><strong>${e(conflictLabels[item.code]||item.code)}.</strong> ${e(item.rule)}</li>`).join("");
+  return `<section class="card stack">
+    <div class="title-row"><div><h3>${e(record.label)}</h3><small>Specimen revision ${record.source_version} · ${e(date(record.created_at))}${record.recheck_of?` · recheck of ${e(record.recheck_of.slice(0,8))}`:""}</small></div>${badge(record.recheck_of?"Rechecked reading":"Saved row","ready")}</div>
+    <div class="actions">${["overlay","source"].map(key=>btn(key==="overlay"?"Row map":"Source plane","band-layer",(record._layer||"overlay")===key?"tiny primary":"tiny secondary",null,`data-value="${key}"`)).join("")}</div>
+    <figure class="stage">${img(path+"/image/"+(record._layer||"overlay")+"?v="+record.version,`${record.label} map`)}</figure>
+    ${bandTrackPlot(m)}
+    <h3>Per-cell family readings</h3><p class="plot-note">${e(m.note)}</p>${cellTables}
+    <h3>Conflict summary</h3>${table(["Conflict","Cells"],m.conflict_summary.map(item=>[conflictLabels[item.code]||item.code,item.count]))}
+    <details><summary>How the conflict points are decided</summary><ul class="policy-list">${policy}</ul></details>
+    <div class="actions">${link("Row metrics CSV",path+"/metrics.csv","secondary","download")}
+      ${btn("Recheck a cell on the image","band-recheck","primary","edit",`data-id="${record.id}"`)}</div>
+  </section>`;
+}
