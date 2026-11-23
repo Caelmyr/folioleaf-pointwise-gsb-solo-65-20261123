@@ -222,7 +222,7 @@ def reference_fingerprint(linear, support):
     }
 
 
-def compare_reference(fingerprint, reference, this_basis, reference_basis):
+def compare_reference(fingerprint, reference, this_basis, reference_basis, ruler=None, reference_ruler=None):
     observed = np.asarray(fingerprint["median_lab"])
     approved = np.asarray(reference["median_lab"])
     delta = observed - approved
@@ -238,7 +238,43 @@ def compare_reference(fingerprint, reference, this_basis, reference_basis):
         "chroma_quantile_delta": float_list(chroma_delta),
         "dispersion_delta": round(fingerprint["dispersion"] - reference["dispersion"], 3),
         "capture_note": limitation,
+        "tone_ruler": ruler_section(ruler, reference_ruler),
     }
+
+
+def ruler_section(ruler, reference_ruler):
+    """Separate, non-destructive readout on the batch tone curve."""
+    section = {
+        "current_reading": ruler,
+        "reference_reading": reference_ruler,
+        "comparable": False,
+        "comparability_note": None,
+    }
+    if ruler is None:
+        section["comparability_note"] = "No batch tone curve is active; no ruler reading was produced."
+        return section
+    if reference_ruler is None:
+        section["comparability_note"] = (
+            "The approved reference has no sampling region on this ruler. Its archived reading is retained; "
+            "do not compare it against the new ruler value."
+        )
+        return section
+    if not reference_ruler.get("source_available"):
+        section["comparability_note"] = (
+            "The reference's original image or approved sampling region can no longer be verified, "
+            "so it cannot be re-read on this ruler. The archived reading stays unchanged."
+        )
+        return section
+    if not reference_ruler.get("same_curve"):
+        section["comparability_note"] = (
+            "The two sides were placed on different tone-card curves and are not comparable on this ruler."
+        )
+        return section
+    section["comparable"] = True
+    section["comparability_note"] = (
+        "Both regions were re-read on the same tone curve; archived readings were not replaced."
+    )
+    return section
 
 
 def matching_basis(first, second):
@@ -249,9 +285,24 @@ def matching_basis(first, second):
     a, b = first["neutral_target"], second["neutral_target"]
     if a != b:
         return "The pair uses different neutral-card targets or one result uses uncorrected color."
+    tone_note = tone_comparability(first.get("tone_card"), second.get("tone_card"))
+    if tone_note is not None:
+        return tone_note
     if a is None:
         return "Both values use the photo color assumption without neutral-card adjustment."
     return "Both were measured with the same neutral target and recorded illumination label."
+
+
+def tone_comparability(first, second):
+    """Flag only the missing-curve case here; LUT identity is checked in the
+    dedicated ruler section, since distinct specimens legitimately use distinct
+    source photos even when they happen to share an identical fitted curve."""
+    if first is None and second is None:
+        return None
+    if first is None or second is None:
+        return ("One side carries a batch tone curve and the other does not, so they are not on a common "
+                "ruler. Keep the archived reading and rely on the tone-ruler section for the verdict.")
+    return None
 
 
 def reference_map(linear, reference):
@@ -260,11 +311,23 @@ def reference_map(linear, reference):
     return delta_e(values, median)
 
 
-def capture_basis(tile, frame, correction):
+def capture_basis(tile, frame, correction, tone=None):
     return {
         "photo_role": frame.photo["role"],
         "synthetic": bool(frame.photo.get("synthetic")),
         "neutral_target": correction["target"] if correction else None,
+        "tone_card": tone_basis_summary(tone),
         "source_space": frame.photo["working_color_space"],
         "tile_id": tile["id"],
+    }
+
+
+def tone_basis_summary(tone):
+    if not tone:
+        return None
+    return {
+        "curve": "tone-card-luminance-lut",
+        "photo_id": tone["photo_id"],
+        "lut_levels": tone["lut_levels"],
+        "anchors": tone["anchors"],
     }

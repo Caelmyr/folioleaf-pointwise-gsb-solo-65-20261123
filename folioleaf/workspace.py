@@ -27,6 +27,7 @@ from .model import (
 )
 from .photos import diagnostic_flags, store_capture
 from .store import make_id
+from .tonecard import tone_card_record
 
 
 def describe_photo(photo, plane, registrations):
@@ -146,6 +147,7 @@ def remove_photo(store, tile_id, capture_id, payload):
                 raise ConflictError("Removing the base photo requires resetting its current sampling plane.")
             tile["plane"] = None
             tile["calibration"] = None
+            tile["tone_card"] = None
             tile["registrations"] = {}
             tile["regions"] = []
         tile["registrations"].pop(capture_id, None)
@@ -197,6 +199,7 @@ def save_plane(store, tile_id, payload):
         tile["registrations"].clear()
         tile["regions"].clear()
         tile["calibration"] = None
+        tile["tone_card"] = None
 
     return store.edit_tile(tile_id, expected, change, "plane", "Saved the photographed tile plane")
 
@@ -245,6 +248,11 @@ def save_region(store, identifier, payload, region_id=None):
             reasons = {region["purpose"], previous["purpose"]} if region_id is not None else {region["purpose"]}
             if tile["calibration"]["region_id"] == chosen or "ignore" in reasons:
                 tile["calibration"] = None
+        if tile["tone_card"]:
+            tracked = {patch["region_id"] for patch in tile["tone_card"]["patches"]}
+            reasons = {region["purpose"], previous["purpose"]} if region_id is not None else {region["purpose"]}
+            if chosen in tracked or "ignore" in reasons:
+                tile["tone_card"] = None
 
     return store.edit_tile(identifier, expected, change, "region", f"Saved sampling region {region['name']}")
 
@@ -258,6 +266,11 @@ def remove_region(store, identifier, region_id, payload):
         tile["regions"].remove(region)
         if tile["calibration"] and (tile["calibration"]["region_id"] == chosen or region["purpose"] == "ignore"):
             tile["calibration"] = None
+        if tile["tone_card"] and (
+            chosen in {patch["region_id"] for patch in tile["tone_card"]["patches"]}
+            or region["purpose"] == "ignore"
+        ):
+            tile["tone_card"] = None
 
     return store.edit_tile(identifier, expected, change, "region", "Removed a live sampling region")
 
@@ -291,3 +304,24 @@ def clear_calibration(store, identifier, payload):
         tile["calibration"] = None
 
     return store.edit_tile(identifier, expected, change, "calibration", "Cleared neutral-card image gains")
+
+
+def preview_tone_card(store, identifier, payload):
+    tile = store.tile(identifier)
+    record, _ = tone_card_record(store, tile, payload, persist=False)
+    return record
+
+
+def save_tone_card(store, identifier, payload):
+    tile = store.tile(identifier)
+    record, _ = tone_card_record(store, tile, payload, persist=True)
+    return record
+
+
+def clear_tone_card(store, identifier, payload):
+    expected = model_version(payload)
+
+    def change(tile):
+        tile["tone_card"] = None
+
+    return store.edit_tile(identifier, expected, change, "tone-card", "Cleared the batch gray-scale tone curve")

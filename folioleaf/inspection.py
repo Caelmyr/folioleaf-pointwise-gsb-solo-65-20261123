@@ -8,13 +8,22 @@ from .defects import gaussian_supported
 from .geometry import active_region, analysis_mask, region_domain, specimen_frame
 from .model import InputError, enumeration, identity, integer, scalar
 from .photos import luminance, uint8_image
+from .tonecard import corrected_with_tone, tone_for
+
+
+def corrected_view(tile, frame, layer):
+    linear, neutral = corrected_linear(tile, frame, layer in ("corrected", "tone", "regions"))
+    tone = tone_for(tile, frame) if layer == "tone" else None
+    if tone is not None:
+        linear = corrected_with_tone(linear, tone["lut"])
+    return linear, neutral, tone
 
 
 def side_preview(store, tile, photo_id, layer):
     frame = specimen_frame(store.blobs, tile, photo_id)
     if layer == "raw":
         return base_rgba(frame)
-    corrected, _ = corrected_linear(tile, frame, layer in ("corrected", "regions"))
+    corrected, _, _ = corrected_view(tile, frame, layer)
     if layer == "regions":
         return annotated_regions(frame, tile["regions"], corrected)
     return base_rgba(frame, corrected)

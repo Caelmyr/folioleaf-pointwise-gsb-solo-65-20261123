@@ -49,16 +49,19 @@ from .study import create_study, public_metrics
 from .workspace import (
     calibrate,
     clear_calibration,
+    clear_tone_card,
     edit_photo,
     edit_specimen,
     import_photo,
     present_tile,
+    preview_tone_card,
     preview_transform,
     remove_photo,
     remove_region,
     save_plane,
     save_region,
     save_registration,
+    save_tone_card,
     summarize_tile,
 )
 
@@ -181,7 +184,7 @@ def register_specimens(api, store, heavy):
 
     @api.get("/specimens/<specimen_id>/viewer/<photo_id>")
     def viewer(specimen_id, photo_id):
-        selected = enumeration(request.args.get("layer", "raw"), ("raw", "regions", "corrected"), "Viewer layer")
+        selected = enumeration(request.args.get("layer", "raw"), ("raw", "regions", "corrected", "tone"), "Viewer layer")
         tile = store.tile(specimen_id)
         with heavy:
             image = side_preview(store, tile, identity(photo_id, "Photo ID"), selected)
@@ -232,6 +235,30 @@ def register_specimens(api, store, heavy):
     @api.delete("/specimens/<specimen_id>/calibration")
     def calibration_remove(specimen_id):
         return jsonify(present_tile(clear_calibration(store, specimen_id, json_request())))
+
+    @api.post("/specimens/<specimen_id>/tone-card/preview")
+    def tone_card_preview(specimen_id):
+        with heavy:
+            record = preview_tone_card(store, specimen_id, json_request())
+        return jsonify(record)
+
+    @api.put("/specimens/<specimen_id>/tone-card")
+    def tone_card_save(specimen_id):
+        with heavy:
+            save_tone_card(store, specimen_id, json_request())
+        return jsonify(present_tile(store.tile(specimen_id)))
+
+    @api.get("/specimens/<specimen_id>/tone-card/overview")
+    def tone_card_overview(specimen_id):
+        tile = store.tile(specimen_id)
+        record = tile.get("tone_card")
+        if record is None:
+            raise MissingError("No tone-card curve is saved for this specimen.")
+        return png_blob(store, record["overview_digest"])
+
+    @api.delete("/specimens/<specimen_id>/tone-card")
+    def tone_card_remove(specimen_id):
+        return jsonify(present_tile(clear_tone_card(store, specimen_id, json_request())))
 
 
 def register_measurements(api, store, heavy):

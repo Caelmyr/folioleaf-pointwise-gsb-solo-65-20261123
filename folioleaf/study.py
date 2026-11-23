@@ -32,6 +32,7 @@ def comparable_signature(result):
         "photo_role": basis["photo_role"],
         "synthetic": basis["synthetic"],
         "neutral_target": basis["neutral_target"],
+        "tone_card_present": basis.get("tone_card") is not None,
         "source_space": basis["source_space"],
     }
     if mode == "coverage":

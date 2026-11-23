@@ -33,10 +33,11 @@ from .silhouette import measure_silhouette
 from .dots import measure_dots
 from .store import key_for
 from .texture import measure_texture
+from .tonecard import corrected_with_tone, ruler_readouts, tone_basis, tone_for
 from .weave import measure_weave
 
 
-ANALYZER_VERSION = 3
+ANALYZER_VERSION = 4
 
 
 def selected_capture(tile, explicit, expected_role=None):
@@ -108,15 +109,24 @@ def support_digest(frame, area):
     }
 
 
+def corrected_image(tile, frame, apply_neutral):
+    """Neutral-card gains first, then the saved batch tone curve when present."""
+    linear, correction = corrected_linear(tile, frame, apply_neutral)
+    tone = tone_for(tile, frame)
+    if tone is not None:
+        linear = corrected_with_tone(linear, tone["lut"])
+    return linear, correction, tone
+
+
 def reference_color_sample(store, tile, photo_id, chosen_region, apply_neutral):
     frame = specimen_frame(store.blobs, tile, photo_id)
     region = active_region(tile, chosen_region)
     domain = region_domain(frame.extent, tile, region)
     valid = analysis_mask(frame, domain, minimum=80, allow_clipped=False)
-    linear, correction = corrected_linear(tile, frame, apply_neutral)
+    linear, correction, tone = corrected_image(tile, frame, apply_neutral)
     return {
         "fingerprint": reference_fingerprint(linear, valid),
-        "basis": capture_basis(tile, frame, correction),
+        "basis": capture_basis(tile, frame, correction, tone),
         "region": region,
         "source": capture_provenance(frame),
         "specimen": specimen_provenance(tile),
@@ -174,7 +184,7 @@ def formula_scale(values, support, floor):
     return max(float(np.quantile(available, 0.97)), floor) if len(available) else floor
 
 
-def compute_single(store, tile, frame, region, area, linear, correction, params, reference):
+def compute_single(store, tile, frame, region, area, linear, correction, params, reference, tone=None):
     kind = params["kind"]
     options = params["options"]
     support = analysis_mask(frame, area, allow_clipped=False)
@@ -223,8 +233,11 @@ def compute_single(store, tile, frame, region, area, linear, correction, params,
         return metrics, image, None
     if kind == "reference":
         fingerprint = reference_fingerprint(linear, support)
-        basis = capture_basis(tile, frame, correction)
-        metrics = compare_reference(fingerprint, reference["fingerprint"], basis, reference["basis"])
+        basis = capture_basis(tile, frame, correction, tone)
+        ruler, reference_ruler = ruler_readouts(store, tile, frame, region, tone, reference)
+        metrics = compare_reference(
+            fingerprint, reference["fingerprint"], basis, reference["basis"], ruler, reference_ruler,
+        )
         metrics["reference_title"] = reference["title"]
         metrics["reference_id"] = reference["id"]
         metrics["reference_image"] = reference["annotated_digest"]
@@ -273,12 +286,15 @@ def evaluate(store, tile_id, payload):
     area = region_domain(frame.extent, tile, region)
     pair = specimen_frame(store.blobs, tile, params["comparison_id"]) if params["comparison_id"] else None
     correction = None
+    tone = None
     linear = frame.linear
     if pair is not None:
         metrics, picture, legend = compute_pair(tile, frame, pair, area, params)
     else:
-        linear, correction = corrected_linear(tile, frame, params["apply_neutral"])
-        metrics, picture, legend = compute_single(store, tile, frame, region, area, linear, correction, params, reference)
+        linear, correction, tone = corrected_image(tile, frame, params["apply_neutral"])
+        metrics, picture, legend = compute_single(
+            store, tile, frame, region, area, linear, correction, params, reference, tone,
+        )
     result = {
         "tile_id": tile_id,
         "source_version": tile["version"],
@@ -287,7 +303,7 @@ def evaluate(store, tile_id, payload):
         "parameters": params,
         "metrics": metrics,
         "legend": legend,
-        "basis": capture_basis(tile, frame, correction),
+        "basis": capture_basis(tile, frame, correction, tone),
         "support": support_digest(frame, area),
         "provenance": {
             "analyzer_version": ANALYZER_VERSION,
@@ -297,6 +313,7 @@ def evaluate(store, tile_id, payload):
             "region": region,
             "exclusions": [item for item in tile["regions"] if item["purpose"] == "ignore"],
             "neutral_card": correction,
+            "tone_card": tone_basis(tone),
             "reference": {
                 "id": reference["id"],
                 "version": reference["version"],

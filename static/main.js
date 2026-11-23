@@ -84,7 +84,7 @@ function imagesForCapture() {
   const canModes=Boolean(photo.registered_url);
   return `<section class="card workspace-viewer">
       <div class="title-row"><h3>${e(photo.role_label)}</h3>${badge(photo.registration_state,canModes?"ready":"caution")}</div>
-      <div class="actions">${[["source","Original framing"],["raw","Survey plane"],["regions","Regions"],...(tile.calibration?[["corrected","Neutral balance"]]:[])].filter(([key])=>canModes||key==="source").map(([key,label])=>btn(label,"viewer",state.viewer===key?"tiny primary":"tiny secondary",null,`data-value="${key}"`)).join("")}</div>
+      <div class="actions">${[["source","Original framing"],["raw","Survey plane"],["regions","Regions"],...(tile.calibration?[["corrected","Neutral balance"]]:[]),...(tile.tone_card?[["tone","Tone curve"]]:[])].filter(([key])=>canModes||key==="source").map(([key,label])=>btn(label,"viewer",state.viewer===key?"tiny primary":"tiny secondary",null,`data-value="${key}"`)).join("")}</div>
       <figure class="stage">${img(illustration,`${photo.role_label} · ${tile.name}`)}</figure>
       <p class="stage-foot">${photo.width} × ${photo.height} px · ${e(photo.working_color_space)}${tile.canvas_size&&canvas?` · Survey plane ${tile.canvas_size.join(" × ")} px`:""}</p>
       <div class="actions">${btn(photo.registration_state==="base"?"Mark survey corners":photo.registered_url?"Edit registration":"Register photo","geometry","secondary","frame")}
@@ -112,6 +112,39 @@ function captures() {
   return `<div class="grid-detail">${imagesForCapture()}${captureSide()}</div>`;
 }
 
+function tonePatchRows(tone) {
+  if (!tone) return "";
+  const dot = sw => `<span class="swatch-chip" style="background:${e(sw)}"></span>`;
+  return table(["Gray cell","Measured","Fitted","Card","Error ΔL*","Verdict"], tone.patches.map(p=>[
+    e(p.role_label),
+    p.rejected_reason? "—" : `${dot(p.measured_swatch)}${n(p.measured_luminance,3)}`,
+    p.fitted_swatch? `${dot(p.fitted_swatch)}${n(p.fitted_luminance,3)}`:"—",
+    p.target_swatch? `${dot(p.target_swatch)}${n(p.target,3)}`:`${n(p.target,3)}`,
+    p.target_error_lstar==null?"—":n(p.target_error_lstar,2),
+    toneStatus(p.status, p.rejected_reason),
+  ]));
+}
+
+function toneStatus(status, reason) {
+  if (status==="held") return badge("Held","ready");
+  if (status==="compromised") return badge("Accepted error","caution");
+  return badge(`Unusable${reason?`: ${e(reason)}`:""}`,"danger");
+}
+
+function toneCardPanel() {
+  const tone=state.tile.tone_card;
+  const body = tone ? `
+    <p class="soft">${e(tone.color_rule)}</p>
+    <div class="tone-curve">${tone.curve_svg}</div>
+    ${tonePatchRows(tone)}
+    <p class="notice">Held cells meet the card within ${n(tone.hold_tolerance_lstar,1)} L*. "Accepted error" is the tier the monotone curve could not avoid this batch; rejected glare cells were excluded from the fit.</p>
+    <figure class="stage">${img(`/api/specimens/${state.tile.id}/tone-card/overview?v=${state.tile.version}`,"Tone curve before/after overview")}</figure>
+    <div class="actions">${btn("Refit tone curve","tone-fit","secondary","sample")}${btn("Clear curve","tone-clear","ghost")}</div>`
+    : `<p class='soft'>Fit one global, monotone curve from the photographed gray scale when the scanner lifts a middle gray above the light grays. Mark a region per usable cell and enter each paper-card reading; glare cells can be left out.</p>
+       <div class="actions">${btn("Fit tone curve","tone-fit","secondary","sample")}</div>`;
+  return `<section class="card"><h3>Batch gray-scale tone curve</h3>${body}</section>`;
+}
+
 function regionPage() {
   const tile=state.tile;
   const current=tile.photos.find(item=>item.registration_state==="base");
@@ -123,7 +156,7 @@ function regionPage() {
      <div class="stack"><section class="card"><h3>Saved regions</h3>${rows?`<div class="divider-list">${rows}</div>`:"<p class='soft'>Draw an inspection area, a coverage reference, or a patch to exclude.</p>"}</section>
      <section class="card"><h3>Neutral-card balance</h3>${gains?`<div class="metrics">${stat("Measured card",gains.before_swatch)}${stat("Balanced card",gains.after_swatch)}${stat("Unclipped card pixels",n(gains.card_samples,0))}</div>`:"<p class='soft'>Use an evenly lit neutral patch to balance this base capture.</p>"}
        <div class="actions">${btn("Balance neutral card","neutral","secondary","sample")}${gains?btn("Clear balance","neutral-clear","ghost"):""}</div>
-     </section></div></div>`;
+     </section>${toneCardPanel()}</div></div>`;
 }
 
 function optionInput(key,item) {
@@ -479,6 +512,49 @@ function neutralForm() {
     "Save balance",async data=>patchTile("/calibration","PUT",parseDatesAndNumbers(data,["target"]),"Neutral-card balance saved."));
 }
 
+const TONE_ROLES=[["dark","Dark gray"],["mid","Middle gray"],["light-a","Light gray A"],["light-b","Light gray B"]];
+
+function toneForm() {
+  if (!state.tile.plane) throw Error("Add a photograph and mark the survey plane before fitting a tone curve.");
+  const regions=state.tile.regions.filter(item=>item.purpose!=="ignore");
+  if (regions.length<2) throw Error("Mark at least two gray-cell regions on the photographed scale first.");
+  const existing=state.tile.tone_card;
+  const byRole=Object.fromEntries((existing?.patches||[]).map(p=>[p.role,p]));
+  const fields=TONE_ROLES.map(([role,label])=>{
+    const prior=byRole[role];
+    const regionChoices=option("","Unused / glare cell — exclude","")+
+      regions.map(item=>option(item.id,item.name,prior?.region_id||"")).join("");
+    return `<fieldset class="tone-row"><legend>${e(label)}</legend>
+      ${selectField("Cell region · "+role,`region_${role}`,regionChoices)}
+      ${numField("Paper-card reading · "+role,`target_${role}`,prior?.target??"",0.001,0.98,0.005)}</fieldset>`;
+  }).join("");
+  modal("Fit batch gray-scale tone curve",
+    `<p class="notice">Enter the reading you took off the paper card for each circled cell. Leave a cell unused if glare makes it unreliable. The fitted curve is global, never decreases, scales RGB together, and never clips a channel.</p>
+     ${fields}<div id="tone-preview"></div>`,
+    "Save tone curve",async data=>{
+      const patches=TONE_ROLES.map(([role])=>({role,
+        region_id:data.get(`region_${role}`)||null,
+        target:Number(data.get(`target_${role}`))})).filter(p=>p.region_id);
+      if (patches.length<2) throw Error("Select at least two usable gray cells.");
+      const body={version:state.tile.version,photo_id:state.tile.plane.photo_id,patches};
+      const preview=await api(tileUrl()+"/tone-card/preview",{method:"POST",body});
+      state.tonePreview=preview;
+      renderTonePreview(preview);
+      await api(tileUrl()+"/tone-card",{method:"PUT",body});
+      state.tile=await api(tileUrl());
+      await gatherTile();
+      commitModal(); toast("Tone curve saved."); render();
+    },true);
+}
+
+function renderTonePreview(preview) {
+  const host=q("#tone-preview"); if (!host) return;
+  host.innerHTML=`<div class="tone-curve">${preview.curve_svg}</div>
+    <div class="divider-list">${preview.patches.map(p=>`<div class="row"><div class="grow"><strong>${e(p.role_label)}</strong><br>
+      <small>${p.rejected_reason?e(p.rejected_reason):`measured ${n(p.measured_luminance,3)} → fitted ${n(p.fitted_luminance,3)} · card ${n(p.target,3)} · ΔL* ${n(p.target_error_lstar,2)}`}</small></div>
+      ${toneStatus(p.status,p.rejected_reason)}</div>`).join("")}</div>`;
+}
+
 function refForm() {
   if (!state.tile.plane) throw Error("Add a specimen photo before approving a reference.");
   modal("Approve visual reference",`${textField("Reference name","title",state.tile.name,'required maxlength="100"')}
@@ -699,6 +775,9 @@ async function doAction(name,target) {
     "draw-undo":()=>{drawPoints.pop();drawUpdate();},
     neutral:neutralForm,
     "neutral-clear":()=>patchTile("/calibration","DELETE",{},"Neutral-card balance cleared."),
+    "tone-fit":()=>toneForm(),
+    "tone-clear":()=>modal("Clear the batch tone curve?",'<p>Measurements already saved keep their snapshot. New measurements revert to the uncurved image.</p>',
+      "Clear curve",async ()=>patchTile("/tone-card","DELETE",{},"Tone curve cleared.")),
     "reference-add":refForm,
     "reference-retire":()=>{
       const ref=state.refs.find(item=>item.id===id);

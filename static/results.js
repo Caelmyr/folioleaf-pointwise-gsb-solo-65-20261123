@@ -124,9 +124,18 @@ function rimDetail(m) {
 }
 
 function referenceDetail(m) {
+  const ruler=m.tone_ruler;
+  const rulerBlock = ruler ? `<h3>Batch tone-curve ruler</h3>
+    <p class="notice ${ruler.comparable?"":"tone-warning"}">${e(ruler.comparability_note)}</p>
+    ${ruler.current_reading?table(["Side","Region","Median L*","Luminance","Pixels"],[
+      ["Current image",ruler.current_reading.region_name,ruler.current_reading.median_lab.map(v=>n(v,2)).join(" / "),n(ruler.current_reading.median_luminance,3),ruler.current_reading.supported_pixels],
+      ...(ruler.reference_reading?.source_available?[["Approved reference",ruler.reference_reading.region_name,ruler.reference_reading.median_lab.map(v=>n(v,2)).join(" / "),n(ruler.reference_reading.median_luminance,3),ruler.reference_reading.supported_pixels]]:[]),
+    ]):""}
+    ${ruler.reference_reading?.archived_median_lab?`<p class="soft">Archived reference reading retained (not replaced): ${ruler.reference_reading.archived_median_lab.map(v=>n(v,2)).join(" / ")}</p>`:""}`
+    :"";
   return `<h3>${e(m.reference_title)}</h3>
     <div class="metrics">${stat("Specimen",m.specimen.swatch)}${stat("Approved reference",m.reference.swatch)}</div>
-    <p class="notice">${e(m.capture_note)}</p>`;
+    <p class="notice">${e(m.capture_note)}</p>${rulerBlock}`;
 }
 
 function details(record) {
@@ -162,6 +171,7 @@ export function resultCard(record, layer, currentRevision) {
       ["Supported area",percent(record.support.available_percent)],
       ["Clipped pixels",record.support.clipped_pixels],
       ["Neutral correction",record.provenance.neutral_card?.before_swatch || "Uncorrected"],
+      ["Tone curve",record.provenance.tone_card?`${record.provenance.tone_card.anchors.length} anchors · LUT ${record.provenance.tone_card.lut_levels}`:"None"],
     ])}</details>
     <div class="actions">${link("Metrics CSV",path+"/metrics.csv","secondary","download")}${btn("Pin evidence","pin", "primary","archive")}</div>
   </section>`;
