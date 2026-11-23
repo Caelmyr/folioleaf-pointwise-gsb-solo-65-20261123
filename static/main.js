@@ -20,6 +20,8 @@ let travel=0;
 let dialogToken=0;
 let drawPoints=[];
 let drawLimit=0;
+let drawGroups=null;
+let drawGroupIndex=0;
 let currentForm=null;
 let reviewUploads=[];
 
@@ -133,6 +135,10 @@ function optionInput(key,item) {
   if (kind==="flag") return checkField(label,key,value);
   if (kind==="region") return selectField(label,key,option("","Auto / current area","")+state.tile.regions.filter(record=>item.purpose?record.purpose===item.purpose:record.purpose!=="ignore").map(record=>option(record.id,record.name)).join(""));
   if (kind==="reference") return selectField(label,key,option("","Choose a reference","")+state.refs.map(record=>option(record.id,record.title)).join(""));
+  if (kind==="vein_reference") {
+    const maps=state.results.filter(record=>record.kind==="veinmap");
+    return selectField(label,key,option("","Choose a saved branch map","")+maps.map(record=>option(record.id,`${record.label} · revision ${record.source_version}`)).join(""));
+  }
   if (kind==="point") return `<div class="field"><span>${e(label)} (X, Y)</span><div class="point-group">
     ${value.map((coordinate,index)=>`<input name="${key}-${index}" aria-label="${e(label)} ${index===0?"X":"Y"}" type="number" min="0" max="1" step=".001" value="${coordinate}">`).join("")}</div></div>`;
   return "";
@@ -149,7 +155,9 @@ function measureControls() {
     ${tool.capture_pair?selectField("Paired photo","comparison_id",match(1)):checkField("Apply saved neutral balance","apply_neutral",true)}
     ${selectField("Region","region_id",regions())}
     <div class="form-columns">${Object.entries(tool.fields).map(([key,item])=>optionInput(key,item)).join("")}</div>
+    <div id="vein-anchor-fields">${state.tool==="veinmap"&&window.__veinAnchors?Object.entries(window.__veinAnchors).map(([key,points])=>`<input type="hidden" name="vein-${key}" value='${JSON.stringify(points)}'>`).join(""):""}</div>
     ${["profile","marking","joint","blade"].includes(state.tool)?btn("Mark line on image","mark-profile","secondary","measure"):""}
+    ${state.tool==="veinmap"?btn("Mark vein anchors on image","mark-vein","secondary","measure"):""}
     <button class="button primary" type="submit">${icon("measure")}Run measurement</button>
   </form>`;
 }
@@ -157,6 +165,16 @@ function measureControls() {
 function measurements() {
   return `<div class="grid-detail"><div>${state.result?resultCard(state.result,state.layer,state.tile.version):empty("Run a measurement to view its map and results.")}</div>
     <div class="stack"><section class="card"><h3>Measure specimen</h3>${measureControls()}</section><section class="card"><h3>Saved measurements</h3>${specimenResultRows(state.results)}</section></div></div>`;
+}
+
+function syncScanModeFields() {
+  const mode=q("#field-scan_mode");
+  if (!mode) return;
+  const follow=mode.value==="follow_vein";
+  for (const suffix of ["start-0","start-1","end-0","end-1"]) q(`#field-${suffix}`)?.closest(".field")?.toggleAttribute("hidden",follow);
+  q('[data-do="mark-profile"]')?.toggleAttribute("hidden",follow);
+  q("#field-vein_result_id")?.closest(".field")?.toggleAttribute("hidden",!follow);
+  q("#field-lateral_number")?.closest(".field")?.toggleAttribute("hidden",!follow);
 }
 
 function evidencePage() {
@@ -246,6 +264,7 @@ function studyPage() {
 function render() {
   chrome();
   q("#main").innerHTML={collection,tile:tilePage,references:libraryPage,studies:studyPage,received:receivedPage}[state.page]();
+  if (state.page==="tile" && state.tab==="measure") syncScanModeFields();
 }
 
 async function gatherTile(token=travel) {
@@ -395,15 +414,64 @@ function drawUpdate() {
   if (!artist) return;
   const coords=drawPoints.map(([x,y])=>[x*1000,y*1000]);
   const edges=(drawLimit===2||coords.length<3)?"polyline":"polygon";
+  const groupOf=index=>{
+    if (!drawGroups) return null;
+    let seen=0;
+    for (const group of drawGroups) {
+      seen+=group.max;
+      if (index<seen) return group;
+    }
+    return drawGroups[drawGroups.length-1];
+  };
   artist.innerHTML=`<${edges} class="draw-line" points="${coords.map(pair=>pair.join(",")).join(" ")}"></${edges}>
-    ${coords.map(([x,y],index)=>`<circle class="draw-point" cx="${x}" cy="${y}" r="10"/><text class="draw-label" x="${x+16}" y="${y+16}">${index+1}</text>`).join("")}`;
+    ${coords.map(([x,y],index)=>{
+      const group=groupOf(index);
+      const label=group?`${group.label} ${Math.max(1,index-drawGroups.slice(0,drawGroups.indexOf(group)).reduce((s,g)=>s+g.max,0)+1)}`:index+1;
+      const style=group?`style="stroke:${group.color};fill:${group.color}"`:"";
+      return `<circle class="draw-point" cx="${x}" cy="${y}" r="10" ${style}/><text class="draw-label" x="${x+16}" y="${y+16}">${label}</text>`;
+    }).join("")}`;
   const label=q("#draw-count");
-  if (label) label.textContent=`${drawPoints.length} of ${drawLimit} points marked`;
+  if (label) {
+    if (drawGroups) {
+      const group=drawGroups[Math.min(drawGroupIndex,drawGroups.length-1)];
+      label.textContent=`${group.title} · ${group.points.length} of ${group.max} (group ${Math.min(drawGroupIndex+1,drawGroups.length)}/${drawGroups.length})`;
+    } else {
+      label.textContent=`${drawPoints.length} of ${drawLimit} points marked`;
+    }
+  }
 }
 
 function prepareDrawing(chosen, limit) {
+  drawGroups=null;
+  drawGroupIndex=0;
   drawPoints=chosen.map(value=>[...value]);
   drawLimit=limit;
+  drawUpdate();
+}
+
+function prepareGroupedDrawing(groups) {
+  drawGroups=groups;
+  drawGroupIndex=0;
+  drawPoints=groups.flatMap(group=>group.points.map(value=>[...value]));
+  drawLimit=groups.reduce((sum,group)=>sum+group.max,0);
+  drawUpdate();
+}
+
+function pushDrawPoint(point) {
+  if (!drawGroups && drawPoints.length>=drawLimit) return;
+  if (drawGroups) {
+    const group=drawGroups[Math.min(drawGroupIndex,drawGroups.length-1)];
+    if (group.points.length>=group.max) {
+      if (drawGroupIndex>=drawGroups.length-1) return;
+      drawGroupIndex++;
+    }
+  }
+  drawPoints.push(point);
+  if (drawGroups) {
+    const group=drawGroups[drawGroupIndex];
+    group.points.push([...point]);
+    if (group.points.length>=group.max && drawGroupIndex<drawGroups.length-1) drawGroupIndex++;
+  }
   drawUpdate();
 }
 
@@ -468,6 +536,35 @@ function lineForm() {
       commitModal();
     },true);
   prepareDrawing([start,end],2);
+}
+
+const VEIN_GROUPS=[
+  {key:"midrib",title:"Midrib: mark 2–4 points along the trusted midrib stretch",label:"M",min:2,max:4,color:"#86dcff"},
+  {key:"lateral_tips",title:"Lateral vein A tip, then non-adjacent lateral vein B tip",label:"L",min:2,max:2,color:"#7ee79e"},
+  {key:"junctions",title:"Candidate junction 1 near the fork, then candidate junction 2",label:"J",min:2,max:2,color:"#e89e60"},
+];
+
+function veinForm() {
+  const form=q("#measurement-form");
+  const id=form.elements.photo_id.value;
+  const base=state.tile.photos.find(item=>id ? item.id===id : item.registration_state==="base");
+  if (!base) throw Error("Set a base capture before marking veins.");
+  const stored=window.__veinAnchors||{midrib:[],lateral_tips:[],junctions:[]};
+  const groups=VEIN_GROUPS.map(group=>({...group,points:(stored[group.key]||[]).map(point=>[...point])}));
+  modal("Mark the vein branch map",
+    `<p class="notice">Mark points in order on visible fine lines. Paths are traced on the observed network only; the mounting strip stays a gap. At the fork, mark both candidate junctions where a real line passes.</p>
+    ${drawing(base.registered_url,"Specimen plane for vein branch marking")}
+    <div class="actions">${btn("Clear points","draw-clear","tiny secondary")}${btn("Undo point","draw-undo","tiny ghost")}<span class="soft" id="draw-count"></span></div>
+    <ol class="vein-steps">${VEIN_GROUPS.map(group=>`<li><strong style="color:${group.color}">${e(group.label)}</strong> ${e(group.title)}</li>`).join("")}</ol>`,
+    "Use vein anchors",async ()=>{
+      const counts=groups.map(group=>group.points.length);
+      if (counts.some((count,index)=>count<groups[index].min)) throw Error("Mark every anchor group: midrib stretch, two lateral tips, two junctions.");
+      window.__veinAnchors=Object.fromEntries(groups.map(group=>[group.key,group.points]));
+      const hidden=q("#vein-anchor-fields");
+      hidden.innerHTML=groups.map(group=>`<input type="hidden" name="vein-${group.key}" value='${JSON.stringify(group.points)}'>`).join("");
+      commitModal();
+    },true);
+  prepareGroupedDrawing(groups);
 }
 
 function neutralForm() {
@@ -635,10 +732,17 @@ function parsedOptions(data,tool) {
 
 async function runMeasurement(data) {
   const revision=travel;
+  const tool=state.config.tools[state.tool];
+  const options=parsedOptions(data,tool);
+  for (const [key,spec] of Object.entries(tool.point_lists||{})) {
+    const raw=data.get("vein-"+key);
+    if (!raw) throw Error(`Mark ${spec.label.toLowerCase()} on the image before running.`);
+    options[key]=JSON.parse(raw);
+  }
   const result=await api(tileUrl()+"/results",{method:"POST",body:{
     kind:state.tool,photo_id:data.get("photo_id")||null,comparison_id:data.get("comparison_id")||null,
     region_id:data.get("region_id")||null,apply_neutral:data.has("apply_neutral"),
-    options:parsedOptions(data,state.config.tools[state.tool]),
+    options,
   }});
   if (revision!==travel) return;
   state.result=result;
@@ -695,8 +799,27 @@ async function doAction(name,target) {
     "region-remove":()=>modal("Remove sampling region?",'<p>Saved measurements retain their snapshot of this region.</p>',"Remove region",async ()=>{
       await patchTile("/regions/"+id,"DELETE",{},"Sampling region removed.");
     }),
-    "draw-clear":()=>{drawPoints=[];drawUpdate();},
-    "draw-undo":()=>{drawPoints.pop();drawUpdate();},
+    "draw-clear":()=>{
+      drawPoints=[];
+      if (drawGroups) {
+        drawGroups.forEach(group=>group.points.length=0);
+        drawGroupIndex=0;
+      }
+      drawUpdate();
+    },
+    "draw-undo":()=>{
+      if (!drawPoints.length) return;
+      drawPoints.pop();
+      if (drawGroups) {
+        let group=drawGroups[drawGroupIndex];
+        if (!group.points.length && drawGroupIndex>0) {
+          drawGroupIndex--;
+          group=drawGroups[drawGroupIndex];
+        }
+        if (group.points.length) group.points.pop();
+      }
+      drawUpdate();
+    },
     neutral:neutralForm,
     "neutral-clear":()=>patchTile("/calibration","DELETE",{},"Neutral-card balance cleared."),
     "reference-add":refForm,
@@ -711,6 +834,7 @@ async function doAction(name,target) {
       });
     },
     "mark-profile":lineForm,
+    "mark-vein":veinForm,
     "trace-add":()=>geometryMeasurementForm("trace"),
     "area-add":()=>geometryMeasurementForm("area"),
     "metrology-open":()=>{state.metrologyActive=state.metrology.find(item=>item.id===id);render();},
@@ -775,8 +899,7 @@ document.addEventListener("click",event=>{
     const rect=drawing.getBoundingClientRect();
     const u=Math.min(1,Math.max(0,(event.clientX-rect.left)/rect.width));
     const v=Math.min(1,Math.max(0,(event.clientY-rect.top)/rect.height));
-    drawPoints.push([Number(u.toFixed(6)),Number(v.toFixed(6))]);
-    drawUpdate();
+    pushDrawPoint([Number(u.toFixed(6)),Number(v.toFixed(6))]);
   }
 });
 
@@ -815,6 +938,10 @@ document.addEventListener("change",event=>{
     const existing=q("#measurement-form");
     existing.outerHTML=measureControls();
     q("#field-kind")?.focus();
+    syncScanModeFields();
+  }
+  if (event.target.id==="field-scan_mode") {
+    syncScanModeFields();
   }
   if (event.target.id==="field-study_kind") studyOptions(event.target.value);
 });

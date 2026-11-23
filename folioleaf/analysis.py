@@ -24,6 +24,7 @@ from .blade import blade_width
 from .defects import measure_defects
 from .craze import measure_craze
 from .rim import measure_rim
+from .vein import build_branch_map, follow_vein_scan
 from .geometry import active_region, analysis_mask, region_domain, specimen_frame
 from .lighting import measure_direction, measure_glare
 from .model import ANALYSIS_LABELS, InputError, library_fields
@@ -36,7 +37,7 @@ from .texture import measure_texture
 from .weave import measure_weave
 
 
-ANALYZER_VERSION = 3
+ANALYZER_VERSION = 4
 
 
 def selected_capture(tile, explicit, expected_role=None):
@@ -147,6 +148,8 @@ def resolve_parameters(store, tile, payload):
             raise InputError("The selected reference has been retired.")
     if kind == "defects" and params["options"]["maximum_area"] <= params["options"]["minimum_area"]:
         raise InputError("Maximum spot size must exceed the minimum.")
+    if kind == "profile" and params["options"].get("scan_mode") == "follow_vein" and not params["options"].get("vein_result_id"):
+        raise InputError("Choose a saved vein branch map before running a follow-vein scan.")
     return params, reference
 
 
@@ -214,10 +217,30 @@ def compute_single(store, tile, frame, region, area, linear, correction, params,
     if kind == "craze":
         metrics, image = measure_craze(frame, linear, area, options)
         return metrics, image, None
+    if kind == "veinmap":
+        metrics, image, _ = build_branch_map(frame, linear, area, options)
+        return metrics, image, None
     if kind == "rim":
         metrics, image = measure_rim(frame, linear, area, options)
         return metrics, image, None
     if kind == "profile":
+        if options.get("scan_mode") == "follow_vein":
+            source_result = store.result(options["vein_result_id"])
+            if source_result["kind"] != "veinmap":
+                raise InputError("Choose a saved vein branch map to follow a vein.")
+            if source_result["tile_id"] != tile["id"]:
+                raise InputError("The vein branch map belongs to another specimen.")
+            if source_result["provenance"]["photo"]["id"] != params["photo_id"]:
+                raise InputError("Use the same capture that the vein branch map was traced on.")
+            metrics = follow_vein_scan(
+                frame, linear, area, source_result["metrics"],
+                options["lateral_number"], options["samples"], options["band_pixels"],
+            )
+            image = profile_overlay(
+                frame, [metrics["path_points"][0], metrics["path_points"][-1]],
+                options["band_pixels"], linear,
+            )
+            return metrics, image, None
         metrics = measure_profile(frame, linear, area, options)
         image = profile_overlay(frame, metrics["endpoints"], options["band_pixels"], linear)
         return metrics, image, None

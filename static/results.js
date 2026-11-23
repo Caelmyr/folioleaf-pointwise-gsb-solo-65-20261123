@@ -19,8 +19,18 @@ export function metricSet(record) {
     direction: () => [["Left-bright detail",percent(m.left_strong_percent)],["Right-bright detail",percent(m.right_strong_percent)],["Paired support",percent(m.support.overlap_percent)]],
     texture: () => [["Medium local roughness",n(m.grid_roughness["50"],5)],["Ridge axis",m.texture_orientation ? n(m.texture_orientation.ridge_angle_clockwise)+"°" : "—"],["Coherence",n(m.texture_orientation?.coherence,3)]],
     craze: () => [["Trace length",`${n(m.network_length)} ${m.length_unit}`],["Junctions",n(m.junctions,0)],["Closed cells",n(m.closed_cell_count,0)]],
+    veinmap: () => [
+      ["Midrib retained",`${n(m.midrib.retained_length)} ${m.midrib.length_unit}`],
+      ["Midrib gaps",n(m.midrib.occluded_gaps.length,0)],
+      ["Lateral veins",n(m.laterals.length,0)],
+      ["Open-gap stumps",n(m.laterals.filter(item=>item.open_gap).length,0)],
+    ],
     rim: () => [["Rim median ΔE",n(m.all_edges.median_from_center_delta_e)],["Rim pixels",n(m.all_edges.pixels,0)],["Interior L*",n(m.interior.median_lab[0])]],
-    profile: () => [["Distance",`${n(m.line_length)} ${m.distance_unit}`],["Valid stations",`${m.supported_stations}/${m.requested_stations}`],["Median L*",n(m.features.median_lightness)]],
+    profile: () => [
+      ["Distance",`${n(m.line_length)} ${m.distance_unit}`],
+      ["Valid stations",`${m.supported_stations}/${m.requested_stations}`],
+      ...(m.mode==="follow_vein"?[["Follow vein",`Lateral ${n(m.lateral_number)}`],["Reading stops at",m.gap_station==null?"no gap":`station ${m.gap_station}`]]:[["Median L*",n(m.features.median_lightness)]]),
+    ],
     reference: () => [["Specimen to reference ΔE",n(m.delta_e76)],["Lightness difference",n(m.delta_lab[0])],["Dispersion difference",n(m.dispersion_delta)]],
     marking: () => [["Measured stations",percent(m.observed_percent)],["Rule among measured",percent(m.midrib_percent_of_observed)],["Runs",m.runs.length]],
     joint: () => [["Measured stations",m.measured_stations],["Unmeasured stations",m.unmeasured_stations],["Median absolute contrast",n(m.median_absolute_step,4)]],
@@ -99,8 +109,44 @@ function textureDetail(m) {
 }
 
 function profileDetail(m) {
+  const gapRows = m.rows.map(item=>[`${n(item.position,3)} ${item.position_unit}`,item.samples,n(item.lightness),n(item.a),n(item.b),item.state||"measured"]);
+  if (m.mode==="follow_vein") {
+    const values=m.rows.map(item=>item.lightness);
+    return `<h3>Lightness along vein L${e(m.lateral_number)}</h3>
+      <p class="plot-note">${e(m.note)}</p>
+      ${plot([{values}],"Lightness along the curved vein",{axis:`0–${n(m.line_length)} ${m.distance_unit}`})}
+      ${m.gap_station==null?"":`<p class="notice">Reading stops at station ${m.gap_station}; later stations are empty gaps and are not bridged to another line.</p>`}
+      <details><summary>Station values (gap stations stay empty)</summary>${table(["Distance","Valid samples","L*","a*","b*","State"],gapRows)}</details>`;
+  }
   return `<h3>Lightness along the marked line</h3>${plot([{values:m.rows.map(item=>item.lightness)}], "Lightness along the station band",{axis:`0–${n(m.line_length)} ${m.distance_unit}`})}
-    <details><summary>Sample station values</summary>${table(["Distance","Valid samples","L*","a*","b*"],m.rows.map(item=>[`${n(item.position,3)} ${item.position_unit}`,item.samples,n(item.lightness),n(item.a),n(item.b)]))}</details>`;
+    <details><summary>Sample station values</summary>${table(["Distance","Valid samples","L*","a*","b*","State"],gapRows)}</details>`;
+}
+
+function veinmapDetail(m) {
+  const decisionRows=m.junction_decisions.map(item=>[
+    `Lateral ${item.lateral}`,
+    item.adopted_junction==null?"Open gap":`J${item.adopted_junction+1}`,
+    e(item.reason),
+  ]);
+  const veinRows=m.laterals.map(item=>{
+    const trace=item.trace||item.stump;
+    return [
+      `Lateral ${item.lateral}`,
+      item.open_gap?"Open-gap stump":(item.junction_anchor?`J${item.adopted_junction+1}`:"—"),
+      trace?`${n(trace.trace_length)} ${trace.length_unit}`:"—",
+      trace?trace.pixel_count:0,
+    ];
+  });
+  const midribRows=m.midrib.segments.map(segment=>[segment.segment,`${n(segment.trace_length)} ${segment.length_unit}`,segment.pixel_count]);
+  return `<h3>Fork decision</h3>
+    <p class="plot-note">${e(m.note)}</p>
+    ${table(["Vein","Adopted junction","Why"],decisionRows)}
+    <h3>Retained traces</h3>
+    ${table(["Element","Ends at","Length","Pixels"],veinRows)}
+    <details><summary>Shared midrib (${m.midrib.segments.length} observed segment${m.midrib.segments.length===1?"":"s"}, ${m.midrib.occluded_gaps.length} gap${m.midrib.occluded_gaps.length===1?"":"s"})</summary>
+      ${table(["Segment","Length","Pixels"],midribRows)}
+      ${m.midrib.occluded_gaps.length?`<p class="notice">Mounting-strip gaps: ${m.midrib.occluded_gaps.map(gap=>`anchors ${gap.between_anchors[0]+1}–${gap.between_anchors[1]+1}`).join("; ")}</p>`:""}
+    </details>`;
 }
 
 function glareDetail(m) {
@@ -139,7 +185,7 @@ function details(record) {
       r.dot, n(r.area_px,0), n(r.area_mm2,5), n(r.axis_ratio,2), n(r.major_angle_deg,1)
     ]))}`,
     color:colorDetail,coverage:coverageDetail,defects:defectsDetail,glare:glareDetail,
-    direction:directionDetail,texture:textureDetail,profile:profileDetail,reference:referenceDetail,craze:crazeDetail,rim:rimDetail,
+    direction:directionDetail,texture:textureDetail,profile:profileDetail,reference:referenceDetail,craze:crazeDetail,veinmap:veinmapDetail,rim:rimDetail,
     marking:markingDetail,joint:jointDetail,aggregate:aggregateDetail,blade:bladeDetail,
   }[record.kind];
   return render(record.kind==="defects" ? record : record.metrics);

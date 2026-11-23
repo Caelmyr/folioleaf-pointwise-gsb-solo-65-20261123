@@ -1,4 +1,5 @@
-from .model import dictionary, enumeration, flag, identity, integer, numeric_pair, scalar
+from .model import InputError, dictionary, enumeration, flag, identity, integer, numeric_pair, scalar
+from .vein import point_list
 
 
 TOOLS = {
@@ -105,6 +106,23 @@ TOOLS = {
             "minimum_cell": {"kind": "integer", "label": "Minimum closed-cell px", "default": 24, "min": 5, "max": 1200},
         },
     },
+    "veinmap": {
+        "label": "Vein branch map",
+        "description": "Trace one shared midrib and two lateral veins on the fine-line network, choosing one of two marked junctions and leaving mounting-strip gaps open.",
+        "point_lists": {
+            "midrib": {"label": "Midrib anchor stretch", "minimum": 2, "maximum": 8},
+            "lateral_tips": {"label": "Lateral vein tips", "minimum": 2, "maximum": 2},
+            "junctions": {"label": "Candidate junctions near the fork", "minimum": 2, "maximum": 2},
+        },
+        "fields": {
+            "radius": {"kind": "number", "label": "Line width radius px", "default": 1.4, "min": 0.6, "max": 5, "step": 0.1},
+            "sensitivity": {"kind": "number", "label": "Line sensitivity", "default": 0.72, "min": 0, "max": 1, "step": 0.02},
+            "join_px": {"kind": "integer", "label": "Bridge width px", "default": 1, "min": 0, "max": 4},
+            "component_minimum": {"kind": "integer", "label": "Minimum trace px", "default": 12, "min": 2, "max": 150},
+            "minimum_cell": {"kind": "integer", "label": "Minimum closed-cell px", "default": 24, "min": 5, "max": 1200},
+            "preferred_junction": {"kind": "integer", "label": "Preferred candidate junction (1 or 2)", "default": 1, "min": 1, "max": 2},
+        },
+    },
     "rim": {
         "label": "Survey margin color",
         "description": "Compare marked surface edges and depth bands with the interior color.",
@@ -118,8 +136,11 @@ TOOLS = {
     },
     "profile": {
         "label": "Line scan",
-        "description": "Draw across a stripe or a surface boundary to inspect a line of color values.",
+        "description": "Draw across a stripe or a surface boundary to inspect a line of color values, or follow a curved vein retained by a vein branch map.",
         "fields": {
+            "scan_mode": {"kind": "choice", "label": "Scan geometry", "default": "straight", "choices": ["straight", "follow_vein"]},
+            "vein_result_id": {"kind": "vein_reference", "label": "Saved vein branch map", "default": None},
+            "lateral_number": {"kind": "integer", "label": "Lateral vein to follow (1 or 2)", "default": 1, "min": 1, "max": 2},
             "start": {"kind": "point", "label": "Start", "default": [0.14, 0.37]},
             "end": {"kind": "point", "label": "End", "default": [0.86, 0.64]},
             "samples": {"kind": "integer", "label": "Stations", "default": 105, "min": 12, "max": 360},
@@ -184,6 +205,8 @@ def parsed_option(key, field, raw):
         return identity(raw, label) if raw else None
     if kind == "reference":
         return identity(raw, label)
+    if kind == "vein_reference":
+        return identity(raw, label) if raw else None
     raise RuntimeError(f"Unknown measurement option {key}.")
 
 
@@ -196,6 +219,20 @@ def analysis_parameters(payload):
         key: parsed_option(key, field, raw_options.get(key, field["default"]))
         for key, field in config["fields"].items()
     }
+    for key, spec in config.get("point_lists", {}).items():
+        options[key] = point_list(
+            raw_options.get(key, []), spec["label"],
+            minimum=spec["minimum"], maximum=spec["maximum"],
+        )
+    if kind == "veinmap":
+        # Junctions and lateral tips are paired and must not collapse together.
+        tips = options["lateral_tips"]
+        junctions = options["junctions"]
+        if tips[0] == tips[1]:
+            raise InputError("Mark two distinct, non-adjacent lateral vein tips.")
+        if junctions[0] == junctions[1]:
+            raise InputError("Mark two distinct candidate junctions near the fork.")
+        options["preferred_junction"] -= 1
     return {
         "kind": kind,
         "options": options,

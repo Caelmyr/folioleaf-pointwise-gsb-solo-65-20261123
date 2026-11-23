@@ -49,6 +49,7 @@ ANALYSIS_LABELS = {
     "texture": "Surface texture",
     "profile": "Line scan",
     "craze": "Fine-line network",
+    "veinmap": "Vein branch map",
     "rim": "Mount margin color",
     "reference": "Reference match",
     "direction": "Raking light comparison",

@@ -40,9 +40,15 @@ def result_metrics_table(record):
     kind = record["kind"]
     metrics = record["metrics"]
     if kind == "profile":
-        columns = (
-            "position", "position_unit", "relative_position", "samples", "lightness", "a", "b", "intensity",
-        )
+        if metrics.get("mode") == "follow_vein":
+            columns = (
+                "position", "position_unit", "relative_position", "samples",
+                "lightness", "a", "b", "intensity", "state",
+            )
+        else:
+            columns = (
+                "position", "position_unit", "relative_position", "samples", "lightness", "a", "b", "intensity",
+            )
         rows = ([item[key] for key in columns] for item in metrics["rows"])
     elif kind == "defects":
         columns = (
@@ -121,6 +127,25 @@ def result_metrics_table(record):
         fields = ("rank", "registered_pixels", "normalized_center", "contrast", "bounding_width", "bounding_height")
         columns = ("unit", *fields)
         rows = ([metrics["unit"], *(item[key] for key in fields)] for item in metrics["candidates"])
+    elif kind == "veinmap":
+        columns = ("element", "index", "state", "junction", "length", "length_unit", "pixel_count", "points")
+        rows = []
+        unit = metrics["midrib"]["length_unit"]
+        for segment in metrics["midrib"]["segments"]:
+            rows.append(("midrib", segment["segment"], "observed", "",
+                         segment["trace_length"], unit, segment["pixel_count"], segment["points"]))
+        for gap in metrics["midrib"]["occluded_gaps"]:
+            rows.append(("midrib_gap", f"{gap['between_anchors'][0]}-{gap['between_anchors'][1]}",
+                         gap["state"], "", "", "", "", ""))
+        for lateral in metrics["laterals"]:
+            trace = lateral.get("trace") or lateral.get("stump") or {}
+            junction = "" if lateral.get("adopted_junction") is None else f"J{lateral['adopted_junction'] + 1}"
+            rows.append((
+                "lateral", lateral["lateral"],
+                "open_gap" if lateral.get("open_gap") else "joined",
+                junction, trace.get("trace_length", ""), trace.get("length_unit", unit),
+                trace.get("pixel_count", ""), trace.get("points", ""),
+            ))
     else:
         columns = ("metric", "value")
         rows = [[key, val] for key, val in metrics.items() if not isinstance(val, (dict, list))]
