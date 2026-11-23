@@ -65,6 +65,13 @@ CREATE TABLE IF NOT EXISTS metrology (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS metrology_tile ON metrology(tile_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS repeats (
+    id TEXT PRIMARY KEY,
+    tile_id TEXT NOT NULL REFERENCES specimens(id),
+    document TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS repeats_tile ON repeats(tile_id, created_at DESC);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -450,14 +457,43 @@ class Store:
             rows = conn.execute("SELECT document FROM received ORDER BY rowid DESC LIMIT 60").fetchall()
             return [json.loads(row["document"]) for row in rows]
 
-    def save_metrology(self, fields):
+    def save_metrology(self, fields, event_message=None):
         record = {**fields, "id": make_id(), "created_at": timestamp()}
         with self.transaction(write=True) as conn:
             conn.execute(
                 "INSERT INTO metrology(id,tile_id,document,created_at) VALUES (?,?,?,?)",
                 (record["id"], record["tile_id"], document(record), record["created_at"]),
             )
-            event(conn, record["tile_id"], "geometry", f"Measured area in the tile plane: {record['title']}")
+            event(conn, record["tile_id"], "geometry",
+                  event_message or f"Measured area in the tile plane: {record['title']}")
+        return record
+
+    def _repeat(self, conn, identifier):
+        chosen = identity(identifier, "Repeat-visit ID")
+        row = conn.execute("SELECT document FROM repeats WHERE id=?", (chosen,)).fetchone()
+        return artifact_row(row, "Repeat-visit comparison")
+
+    def repeat(self, identifier):
+        with self.connect() as conn:
+            return self._repeat(conn, identifier)
+
+    def list_repeats(self, tile_id):
+        chosen = identity(tile_id, "Specimen ID")
+        with self.connect() as conn:
+            self._tile(conn, chosen)
+            rows = conn.execute(
+                "SELECT document FROM repeats WHERE tile_id=? ORDER BY rowid DESC LIMIT 50", (chosen,),
+            ).fetchall()
+            return [json.loads(row["document"]) for row in rows]
+
+    def save_repeat(self, fields):
+        record = {**fields, "id": make_id(), "created_at": timestamp(), "version": 1}
+        with self.transaction(write=True) as conn:
+            conn.execute(
+                "INSERT INTO repeats(id,tile_id,document,created_at) VALUES (?,?,?,?)",
+                (record["id"], record["tile_id"], document(record), record["created_at"]),
+            )
+            event(conn, record["tile_id"], "repeat", f"Saved repeat-visit comparison: {record['title']}")
         return record
 
     def metrology(self, identifier):

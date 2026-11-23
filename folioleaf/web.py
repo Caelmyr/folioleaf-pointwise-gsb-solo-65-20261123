@@ -43,6 +43,7 @@ from .model import (
 from .parameters import TOOLS
 from .quality import quality_manifest
 from .photos import png_bytes
+from .repeat_visit import build_repeat
 from .review import parse_reviews, review_selection, save_reviews
 from .store import Store
 from .study import create_study, public_metrics
@@ -425,6 +426,37 @@ def register_desks(api, store, heavy):
         record = store.metrology(entry_id)
         name = filename_stem(record["title"], "geometry")
         return binary_response(artifact_json(record), "application/json", name + ".json")
+
+    @api.get("/specimens/<specimen_id>/repeats")
+    def repeat_list(specimen_id):
+        return jsonify({"items": store.list_repeats(specimen_id)})
+
+    @api.post("/specimens/<specimen_id>/repeats")
+    def repeat_save(specimen_id):
+        tile = store.tile(specimen_id)
+        with heavy:
+            documents, pictures, _ = build_repeat(store, tile, json_request())
+        record = store.save_repeat({**documents, "pictures": pictures})
+        return jsonify(record), 201
+
+    @api.post("/specimens/<specimen_id>/repeats/preview")
+    def repeat_preview(specimen_id):
+        tile = store.tile(specimen_id)
+        with heavy:
+            documents, pictures, detail = build_repeat(store, tile, json_request())
+        response = png_blob(store, pictures["overlay"])
+        response.headers["X-FolioLeaf-Repeat"] = json.dumps(documents["metrics"], separators=(",", ":"))
+        return response
+
+    @api.get("/repeats/<repeat_id>")
+    def repeat_show(repeat_id):
+        return jsonify(store.repeat(repeat_id))
+
+    @api.get("/repeats/<repeat_id>/image/<layer>")
+    def repeat_image(repeat_id, layer):
+        chosen = enumeration(layer, ("overlay", "change", "tradeoff"), "Repeat image layer")
+        record = store.repeat(repeat_id)
+        return png_blob(store, record["pictures"][chosen])
 
 
 def register_training(api, store, heavy):

@@ -29,6 +29,7 @@ ROLE_LABELS = {
     "parallel": "Parallel-polarized",
     "rake-left": "Raking light from left",
     "rake-right": "Raking light from right",
+    "revisit": "Repeat visit (later day)",
     "reference": "Reference capture",
 }
 REGION_PURPOSES = {

@@ -1,7 +1,8 @@
 import {q,qa,icon,e,btn,link,badge,empty,option,img,field,textField,selectField,numField,checkField,areaField,api,request,date,n,percent,plot,stat,table} from "./widgets.js";
 import {resultCard,specimenResultRows} from "./results.js";
+import {openRepeatEditor,bindRepeatActions,wireRepeatInputs,repeatTab} from "./repeat.js";
 
-const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:""};
+const state={page:"collection",tile:null,tiles:[],tab:"captures",tool:"color",capture:null,viewer:"raw",layer:"overlay",result:null,config:null,results:[],refs:[],packets:[],study:null,studies:[],query:"",repeats:[],repeatActive:null};
 const dialog=q("#dialog");
 const nav=[
   ["collection","Specimens","tiles"],
@@ -10,7 +11,7 @@ const nav=[
   ["received","Received evidence","archive"],
 ];
 const tabs=[
-  ["captures","Captures","camera"],["regions","Sampling regions","frame"],["measure","Measure","measure"],["geometry","Geometry","frame"],["evidence","Evidence","archive"],
+  ["captures","Captures","camera"],["regions","Sampling regions","frame"],["repeat","Repeat visit","compare"],["measure","Measure","measure"],["geometry","Geometry","frame"],["evidence","Evidence","archive"],
 ];
 const tileUrl=()=>`/api/specimens/${state.tile.id}`;
 const tileData=extra=>({version:state.tile.version,...extra});
@@ -174,14 +175,26 @@ function geometryPage() {
   if (record) {
     const metrics=record.shape;
     const base=`/api/metrology/${record.id}`;
-    const stats=record.mode==="trace"
-      ? [["Trace length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Supported stations",percent(metrics.overall_support)]]
-      : [["Marked area",`${n(metrics.vector_outline_area)} ${metrics.units}`],["Visible area",`${n(metrics.raster_supported_area)} ${metrics.units}`],["Outline",`${n(metrics.outline_length)} ${metrics.outline_unit}`]];
-    const stations=record.mode==="trace"?metrics.segments:metrics.outline_segments;
+    let stats, detail;
+    if (record.mode==="repeat_area") {
+      stats=[["Day 1 area",`${n(metrics.day_one_area)} ${metrics.units}`],
+        ["Day 2 same-mesh area",`${n(metrics.day_two_area)} ${metrics.units}`],
+        ["Comparable edges",metrics.comparable_edge_count],["Missing-evidence edges",metrics.missing_edge_count]];
+      const edgeRows=[...metrics.edges_day_one.map(e=>["Day 1",e.index,e.comparable?"Comparable":"Missing evidence",percent(e.strong_support_percent)]),
+        ...metrics.edges_day_two.map(e=>["Day 2",e.index,e.comparable?"Comparable":"Missing evidence",percent(e.strong_support_percent)])];
+      detail=table(["Visit","Edge","Status","Strong support"],edgeRows);
+    } else {
+      const stats2=record.mode==="trace"
+        ? [["Trace length",`${n(metrics.trace_length)} ${metrics.length_unit}`],["Supported stations",percent(metrics.overall_support)]]
+        : [["Marked area",`${n(metrics.vector_outline_area)} ${metrics.units}`],["Visible area",`${n(metrics.raster_supported_area)} ${metrics.units}`],["Outline",`${n(metrics.outline_length)} ${metrics.outline_unit}`]];
+      stats=stats2;
+      const stations=record.mode==="trace"?metrics.segments:metrics.outline_segments;
+      detail=table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]));
+    }
     report=`<section class="card stack"><h3>${e(record.title)}</h3>
       <figure class="stage">${img(base+"/overlay.png",record.title)}</figure>
       <div class="metrics">${stats.map(([name,value])=>stat(name,value)).join("")}</div>
-      ${table(["Segment","Length","Heading"],stations.map(item=>[item.index,`${n(item.length)} ${item.units}`,n(item.clockwise_heading)+"°"]))}
+      ${detail}
       <div class="actions">${link("Measurement JSON",base+"/data.json","secondary","download")}</div></section>`;
   }
   return `<div class="grid-detail">${report}<div class="stack"><section class="card"><h3>Measure a visible shape</h3>
@@ -208,6 +221,10 @@ function receivedPage() {
     <div class="grid-detail">${view}<section class="card"><h3>Received packets</h3><div class="divider-list">${items.map(item=>`<div class="row"><div class="grow">${e(item.title)}<br><small>${e(date(item.imported_at))}</small></div>${btn("Open","received-open","tiny secondary",null,`data-id="${item.id}"`)}</div>`).join("")||"<p class='soft'>No received packets.</p>"}</div></section></div>`;
 }
 
+function repeatPage() {
+  return repeatTab(state.tile, state.repeats, state.repeatActive, null);
+}
+
 function tilePage() {
   const tile=state.tile;
   const descriptors=[tile.glaze,tile.body,tile.firing,tile.width_mm&&tile.height_mm?`${tile.width_mm} × ${tile.height_mm} mm`:null].filter(Boolean);
@@ -215,7 +232,7 @@ function tilePage() {
   <p>${e(descriptors.join(" · ") || "Registered specimen sheet")}</p></div><div class="actions">${btn("Edit specimen","tile-edit","secondary","edit")}
   ${btn("Approve reference","reference-add","secondary","book")}</div></header>
   <nav class="tabs" aria-label="Specimen tools">${tabs.map(([key,label,glyph])=>`<button type="button" class="tab ${state.tab===key?"active":""}" data-do="tile-tab" data-value="${key}">${icon(glyph)}${e(label)}</button>`).join("")}</nav>
-  ${{captures,regions:regionPage,measure:measurements,geometry:geometryPage,evidence:evidencePage}[state.tab]()}`;
+  ${{captures,regions:regionPage,repeat:repeatPage,measure:measurements,geometry:geometryPage,evidence:evidencePage}[state.tab]()}`;
 }
 
 function libraryPage() {
@@ -250,8 +267,8 @@ function render() {
 
 async function gatherTile(token=travel) {
   const url=tileUrl();
-  const [results,packets,activity,refs,metrology]=await Promise.all([
-    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),
+  const [results,packets,activity,refs,metrology,repeats]=await Promise.all([
+    api(url+"/results"),api(url+"/evidence"),api(url+"/activity"),api("/api/library"),api(url+"/metrology"),api(url+"/repeats"),
   ]);
   if (token!==travel) return;
   state.results=results.items;
@@ -259,6 +276,7 @@ async function gatherTile(token=travel) {
   state.activity=activity.items;
   state.metrology=metrology.items;
   state.refs=refs.items;
+  state.repeats=repeats.items;
 }
 
 async function route() {
@@ -270,7 +288,7 @@ async function route() {
     const tile=await api(`/api/specimens/${id}`);
     if (token!==travel) return;
     if (state.tile?.id!==tile.id || state.page!=="tile") {
-      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;
+      state.tab="captures"; state.capture=null; state.result=null;state.layer="overlay";state.viewer="raw";state.metrologyActive=null;state.repeatActive=null;
     }
     state.tile=tile;
     await gatherTile(token);
@@ -535,6 +553,25 @@ function geometryMeasurementForm(mode) {
   if (!area) prepareDrawing([],45);
 }
 
+function repeatAreaForm(repeatId) {
+  const choices=state.tile.regions.filter(item=>item.purpose!=="ignore");
+  if (!choices.length) throw Error("Draw an inspection region on day 1 before comparing its area.");
+  modal("Compare one drawn area across the two visits",
+    selectField("Day-1 region", "region_id", choices.map(r=>option(r.id,r.name)).join(""))+
+    `<p class="notice">The region is warped onto day 2 with the saved landmark mesh. Green edges have evidence on both days; red edges are missing evidence and must not be read as a real edge move.</p>`,
+    "Measure both days", async data=>{
+      const record=await api(tileUrl()+"/metrology",{method:"POST",body:{
+        title:"Repeat-visit region area", mode:"repeat_area", repeat_id:repeatId, region_id:data.get("region_id"),
+      }});
+      state.metrologyActive=record;
+      await gatherTile();
+      commitModal();
+      state.tab="geometry";
+      toast("Same-area comparison saved. Open it in Geometry.");
+      render();
+    });
+}
+
 function importEvidence() {
   modal("Verify evidence ZIP",field("Evidence ZIP","packet",'<input id="field-packet" name="packet" type="file" accept="application/zip,.zip" required>')+
     '<p class="soft">Select a FolioLeaf inspection archive up to 24 MiB. The viewer checks the declared images against their embedded digests.</p>',
@@ -714,6 +751,10 @@ async function doAction(name,target) {
     "trace-add":()=>geometryMeasurementForm("trace"),
     "area-add":()=>geometryMeasurementForm("area"),
     "metrology-open":()=>{state.metrologyActive=state.metrology.find(item=>item.id===id);render();},
+    "repeat-new":()=>openRepeatEditor(modal,state.tile,async()=>{await gatherTile();}),
+    "repeat-open":()=>{state.repeatActive=id;render();},
+    "repeat-layer":()=>{window.__repeatLayer=value;render();},
+    "repeat-area":()=>repeatAreaForm(id),
     "receive-add":importEvidence,
     "received-open":()=>{state.receivedActive=state.received.find(item=>item.id===id);render();},
     "defect-note":()=>{
@@ -744,8 +785,11 @@ async function doAction(name,target) {
     "study-open":()=>{state.study=state.studies.find(item=>item.id===id);render();},
     close:commitModal,
   };
+  bindRepeatActions(functions);
   if (functions[name]) await functions[name]();
 }
+
+wireRepeatInputs();
 
 function displayFault(err, inside=false) {
   if (inside && dialog.open) {

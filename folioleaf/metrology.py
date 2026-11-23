@@ -8,6 +8,7 @@ from .analysis import capture_provenance, specimen_provenance
 from .art import ACCENT, INK, SHADOW, base_rgba, curve_points, stored_preview
 from .geometry import active_region, polygon_mask, proper_axis, region_domain, signed_area, specimen_frame, validate_polygon
 from .model import InputError, collection, dictionary, enumeration, identity, numeric_pair, string
+from .repeat_visit import compare_region
 
 
 MIN_SEGMENT = 2.0
@@ -229,8 +230,28 @@ def polygon_geometry(tile, frame, selection, available):
 def create_metrology(store, specimen_id, payload):
     data = dictionary(payload, "Image measurement")
     title = string(data.get("title"), "Measurement title", maximum=90)
-    mode = enumeration(data.get("mode"), ("trace", "area"), "Geometry measurement")
+    mode = enumeration(data.get("mode"), ("trace", "area", "repeat_area"), "Geometry measurement")
     tile = store.tile(specimen_id)
+    if mode == "repeat_area":
+        repeat = store.repeat(identity(data.get("repeat_id"), "Repeat-visit ID"))
+        if repeat["tile_id"] != tile["id"]:
+            raise InputError("The repeat-visit comparison belongs to another specimen.")
+        region = active_region(tile, identity(data.get("region_id"), "Region ID"))
+        frame_one = specimen_frame(store.blobs, tile, repeat["first_photo_id"])
+        frame_two = specimen_frame(store.blobs, tile, repeat["second_photo_id"])
+        shape, overlay = compare_region(store, tile, repeat, region, frame_one, frame_two)
+        return store.save_metrology({
+            "title": title,
+            "mode": mode,
+            "tile_id": tile["id"],
+            "specimen": specimen_provenance(tile),
+            "source": capture_provenance(frame_one),
+            "paired_source": capture_provenance(frame_two),
+            "repeat_id": repeat["id"],
+            "region": region,
+            "shape": shape,
+            "image": stored_preview(overlay, store.blobs),
+        }, f"Compared the same traced area across two visits: {title}")
     frame = specimen_frame(store.blobs, tile)
     available = region_domain(frame.extent, tile) & frame.valid
     if mode == "trace":

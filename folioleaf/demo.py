@@ -7,21 +7,38 @@ from scipy import ndimage
 
 from .geometry import DEFAULT_CORNERS, canvas_dimensions, homography
 from .photos import linear_to_srgb, png_bytes, srgb_to_linear
-from .store import make_id
+from .store import document, event, make_id
+from .model import timestamp
 from .photos import store_capture
 
 
-DEMO_KEY = "folioleaf.training.v1"
+DEMO_KEY = "folioleaf.training.v2"
 PLANE_SIZE = (620, 472)
 PHOTO_SIZE = (766, 598)
 DEMO_ROLES = ("diffuse", "parallel", "cross", "rake-left", "rake-right")
+REPEAT_SEED = 562
+REPEAT_ROLE = "revisit"
 POSES = {
-    "diffuse": [[0.092, 0.086], [0.911, 0.112], [0.894, 0.912], [0.081, 0.889]],
+    "diffuse": [[0.092, 0.086], [0.911, 0.112], [0.911, 0.912], [0.081, 0.889]],
     "parallel": [[0.122, 0.107], [0.910, 0.084], [0.925, 0.871], [0.101, 0.916]],
     "cross": [[0.079, 0.101], [0.908, 0.119], [0.877, 0.916], [0.081, 0.909]],
     "rake-left": [[0.089, 0.094], [0.894, 0.088], [0.902, 0.905], [0.064, 0.911]],
     "rake-right": [[0.094, 0.095], [0.913, 0.094], [0.926, 0.906], [0.112, 0.893]],
+    REPEAT_ROLE: [[0.087, 0.090], [0.905, 0.104], [0.900, 0.908], [0.076, 0.895]],
 }
+# Stable vein crossings and an edge notch the user can recognize on both days.
+# Day-two positions are derived from repeat_drift once that function is defined.
+_REPEAT_ANCHORS = [
+    (0.286, 0.478), (0.348, 0.462), (0.438, 0.548), (0.522, 0.430), (0.610, 0.520),
+    (0.692, 0.455), (0.766, 0.520), (0.568, 0.648), (0.472, 0.612), (0.402, 0.372),
+    (0.644, 0.386), (0.386, 0.606), (0.582, 0.352),
+]
+REPEAT_LANDMARKS = []
+# A fold line hides blade tissue in both visits, on different patches.
+REPEAT_EXCLUSIONS = [
+    {"day": "first", "center": [0.628, 0.585], "radius": 0.034},
+    {"day": "second", "center": [0.651, 0.566], "radius": 0.030},
+]
 
 
 @dataclass(frozen=True)
@@ -107,7 +124,7 @@ def leaf_form(specimen, x, y, mottling):
     radial = np.clip(length, 0, 1)
     profile = np.maximum(np.sin(np.pi * radial), 0) ** .79
     seed_styles = {173: (.202, .006, 38), 284: (.187, .037, 93),
-                   391: (.222, .19, 37), 475: (.119, .035, 57)}
+                   391: (.222, .19, 37), 475: (.119, .035, 57), REPEAT_SEED: (.205, .010, 41)}
     width, serration, wave = seed_styles[specimen.seed]
     left_scale = 1 + serration * np.cos(wave * x + .46)
     right_scale = 1 + serration * np.cos(wave * x - .72)
@@ -267,6 +284,105 @@ def training_regions():
     ]
 
 
+def repeat_drift(x, y):
+    """Smooth local re-flattening: the blade opens out across its middle, fading
+    to nothing at the anchored tip and base so their rims do not scale."""
+    growth = np.exp(-(((x - 0.50) / 0.26) ** 2 + ((y - 0.52) / 0.30) ** 2))
+    envelope = np.clip((x - 0.24) / 0.10, 0, 1) * np.clip((0.82 - x) / 0.10, 0, 1)
+    magnitude = growth * envelope
+    return np.stack([0.016 * magnitude, 0.022 * magnitude * np.sin(2.4 * x + 0.7)], axis=-1)
+
+
+REPEAT_LANDMARKS[:] = [
+    ([x, y], [round(float(x + repeat_drift(np.array(x), np.array(y))[0]), 5),
+              round(float(y + repeat_drift(np.array(x), np.array(y))[1]), 5)])
+    for x, y in _REPEAT_ANCHORS
+]
+
+
+def render_repeat_photo(field, specimen):
+    height, width = field.diffuse.shape[:2]
+    y, x = np.indices((height, width), dtype=np.float32)
+    nx = (x + 0.5) / width
+    ny = (y + 0.5) / height
+    # Inverse warp: a day-two pixel at (nx, ny) samples the day-one tissue at
+    # (nx, ny) minus the local re-flattening drift. This leaves no stretched
+    # edge holes, unlike a forward scatter of the original pixels.
+    drift = repeat_drift(nx, ny)
+    source_x = np.clip(nx - drift[:, :, 0], 0, 1)
+    source_y = np.clip(ny - drift[:, :, 1], 0, 1)
+    coords = (source_y * height - 0.5, source_x * width - 0.5)
+    moved = np.stack(
+        [ndimage.map_coordinates(field.diffuse[:, :, c], coords, order=1, mode="nearest") for c in range(3)],
+        axis=2,
+    )
+    # Day-two tissue now sits at the drifted (forward) positions. The old stress
+    # mark fades where it now lands, and a small new dark mark appears beside it.
+    old_center = np.array((0.433, 0.593)) + repeat_drift(np.array(0.433), np.array(0.593))
+    old = np.exp(-(((nx - old_center[0]) / .062) ** 2 + ((ny - old_center[1]) / .032) ** 2))
+    moved += (0.46 * old[..., None] * np.array([0.11, 0.10, 0.045], np.float32))
+    fresh_center = np.array((0.495, 0.548))
+    fresh = np.exp(-(((nx - fresh_center[0]) / .016) ** 2 + ((ny - fresh_center[1]) / .014) ** 2))
+    moved *= 1 - 0.42 * fresh[..., None]
+    repeat_field = ProofField(
+        np.clip(moved, 0, 1), field.height, field.ink_fraction, field.keyline_mask,
+        field.roughness, field.u, field.v,
+    )
+    # Reuse the diffuse lighting field so visit differences are tissue changes, not relighting.
+    linear = light_field(repeat_field, "diffuse")
+    image = warp_to_photo(linear, POSES[REPEAT_ROLE], PHOTO_SIZE, specimen.seed)
+    array = np.rint(np.clip(image, 0, 1) * 255).astype(np.uint8)
+    return Image.fromarray(array)
+
+
+REPEAT_SPECIMEN = DemoSpecimen(REPEAT_SEED, "Re-pressed blade · LF27", "Broad oval form", "Dry mounted",
+                               "Three-day revisit", "Folio D",
+                               ((56, 52, 30), (118, 122, 57), (162, 158, 84)))
+
+
+def repeat_training_specimen(store):
+    specimen = REPEAT_SPECIMEN
+    field = bake_field(specimen)
+    photos = []
+    for role in DEMO_ROLES:
+        photo = store_capture(
+            store.blobs, png_bytes(render_photo(field, role, specimen)), role,
+            f"{specimen.name.lower().replace(' ', '-')}-{role}.png",
+            "Synthetic mounted pressed-leaf form with backing and registration targets.",
+            make_id(), synthetic=True,
+        )
+        photos.append(photo)
+    revisit = store_capture(
+        store.blobs, png_bytes(render_repeat_photo(field, specimen)), REPEAT_ROLE,
+        f"{specimen.name.lower().replace(' ', '-')}-revisit.png",
+        "Synthetic re-photograph after three days: the blade re-flattens locally, an old mark fades and a new mark appears.",
+        make_id(), synthetic=True,
+    )
+    photos.append(revisit)
+    base = photos[0]
+    size = canvas_dimensions(base, POSES["diffuse"], 112, 84)
+    regions = training_regions()
+    regions.append(rectangle("Watched old mark", "inspection", 0.385, 0.548, 0.472, 0.632))
+    return {
+        "name": specimen.name,
+        "batch": specimen.batch,
+        "body": specimen.body,
+        "glaze": specimen.glaze,
+        "firing": specimen.firing,
+        "notes": "Synthetic leaf photographed twice while flattening. Day-one and revisit views share the survey plane; the blade itself moves locally.",
+        "width_mm": 112,
+        "height_mm": 84,
+        "synthetic": True,
+        "photos": photos,
+        "plane": {"photo_id": base["id"], "corners": POSES["diffuse"], "size": list(size)},
+        "regions": regions,
+        "registrations": {
+            photo["id"]: {"base_photo_id": base["id"], "corners": POSES[photo["role"]], "support_percent": 100}
+            for photo in photos[1:]
+        },
+    }
+
+
 def training_specimen(store, specimen):
     field = bake_field(specimen)
     photos = []
@@ -307,7 +423,36 @@ def load_training(store):
     if existing:
         return existing, False
     rows = [training_specimen(store, specimen) for specimen in SERIES]
-    return store.seed_tiles(DEMO_KEY, rows), True
+    repeat_row = repeat_training_specimen(store)
+    with store.transaction(write=True) as conn:
+        for index, row in enumerate(rows):
+            rows[index] = store._insert_tile(conn, row, "Loaded synthetic training material")
+        repeat_tile = store._insert_tile(conn, repeat_row, "Loaded synthetic training material")
+        documents, pictures, _ = build_seeded_repeat(store, repeat_tile)
+        record = {**documents, "id": make_id(), "created_at": timestamp(), "version": 1, "pictures": pictures}
+        conn.execute(
+            "INSERT INTO repeats(id,tile_id,document,created_at) VALUES (?,?,?,?)",
+            (record["id"], record["tile_id"], document(record), record["created_at"]),
+        )
+        event(conn, repeat_tile["id"], "repeat", f"Saved repeat-visit comparison: {record['title']}")
+        stored = [tile["id"] for tile in [*rows, repeat_tile]]
+        conn.execute("INSERT INTO settings(key,value) VALUES (?,?)", (DEMO_KEY, document(stored)))
+    rows.append(repeat_tile)
+    return rows, True
+
+
+def build_seeded_repeat(store, tile):
+    first_id = tile["plane"]["photo_id"]
+    second_id = next(photo["id"] for photo in tile["photos"] if photo["role"] == REPEAT_ROLE)
+    payload = {
+        "title": "Three-day flattening revisit",
+        "first_photo_id": first_id,
+        "second_photo_id": second_id,
+        "landmarks": [{"first": one, "second": two} for one, two in REPEAT_LANDMARKS],
+        "exclusions": REPEAT_EXCLUSIONS,
+    }
+    from .repeat_visit import build_repeat
+    return build_repeat(store, tile, payload)
 
 
 @lru_cache(maxsize=1)
